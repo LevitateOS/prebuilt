@@ -1,0 +1,346 @@
+name: Publish prebuilt parts
+
+# Compiles every part `distro-builder prebuilt list` names whose release is missing here,
+# with the recipe an ISO build uses, and publishes it as the release <family>-<key16>.
+# Never replaces a published asset (`prebuilt publish` refuses). See README.md.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      part:
+        description: >-
+          Build only this part, exactly as `prebuilt list` prints it, such as
+          "tools recab" or "tui install-tui --distro levitate". Empty: every part.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+# One run publishes at a time; a run that starts later waits, none is cancelled.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: '1.99.0'
+  GH_TOKEN: ${{ github.token }}
+  LEVITATE_PREBUILT_REPO: ${{ github.repository }}
+  REPO: ${{ github.workspace }}/levitate
+  # The directory `cargo xtask` gives root's builds: Recipe and the Ginux launcher build here.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/levitate/.artifacts/work/iso-runtime-fixes/cargo-host
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out LevitateOS
+        uses: actions/checkout@v4
+        with:
+          repository: LevitateOS/LevitateOS
+          submodules: recursive
+          path: levitate
+          persist-credentials: false
+
+      - name: Move the submodules to the heads developers build
+        working-directory: levitate
+        run: |
+          set -euo pipefail
+          # Every submodule with a branch in .gitmodules; its nested submodules stay as recorded.
+          git config -f .gitmodules --get-regexp '^submodule\..*\.branch$' | while read -r key _; do
+            name="${key#submodule.}"
+            name="${name%.branch}"
+            path="$(git config -f .gitmodules "submodule.${name}.path")"
+            git submodule update --init --remote -- "$path"
+            git -C "$path" submodule update --init --recursive
+          done
+          {
+            echo '### Sources'
+            echo
+            echo '| Checkout | Commit |'
+            echo '| --- | --- |'
+            echo "| LevitateOS | \`$(git rev-parse HEAD)\` |"
+            git submodule status | while read -r line; do
+              line="${line#[ +-]}"
+              commit="${line%% *}"
+              rest="${line#* }"
+              echo "| ${rest%% *} | \`${commit}\` |"
+            done
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Make room on the runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl erofs-utils rpm2cpio rpm cpio jq ripgrep xz-utils bzip2 zstd pkg-config libssl-dev
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+          mkdir -p "$REPO/.artifacts/work" "$REPO/.artifacts/prebuilt" "$CARGO_TARGET_DIR"
+          echo "WEEK=$(date -u +%G-%V)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-v1-${{ env.WEEK }}-${{ hashFiles('levitate/Cargo.lock', 'levitate/tools/ginux/Cargo.lock') }}
+          restore-keys: cargo-v1-
+
+      - name: Cache cargo target (Recipe, Ginux, builder)
+        id: target-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: levitate/.artifacts/work/iso-runtime-fixes/cargo-host
+          key: target-v1-${{ env.WEEK }}-${{ hashFiles('levitate/Cargo.lock', 'levitate/tools/ginux/Cargo.lock') }}
+          restore-keys: target-v1-
+
+      - name: Cache download store
+        id: store-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: levitate/.artifacts/store/sha256
+          key: store-v1-${{ hashFiles('levitate/distro/builder/os-recipes/**') }}
+          restore-keys: store-v1-
+
+      - name: Build distro-builder and xtask
+        working-directory: levitate
+        run: |
+          set -euo pipefail
+          # Fetch everything now, as the runner user: root's builds run offline.
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path tools/ginux/Cargo.toml
+          cargo build --locked --release -p distro-builder --bin distro-builder -p levitate-xtask
+
+      - name: Plan (list, key, look for releases)
+        id: plan
+        working-directory: levitate
+        run: |
+          set -uo pipefail
+          XTASK="$CARGO_TARGET_DIR/release/levitate-xtask"
+          results="$RUNNER_TEMP/results.tsv"
+          : > "$results"
+          "$XTASK" prebuilt list > "$RUNNER_TEMP/parts.txt"
+          if [ -n "${PART:-}" ]; then
+            grep -Fx -- "$PART" "$RUNNER_TEMP/parts.txt" > "$RUNNER_TEMP/selected.txt" \
+              || { echo "::error::'$PART' is not a part; \`prebuilt list\` has:"; cat "$RUNNER_TEMP/parts.txt"; exit 1; }
+            mv "$RUNNER_TEMP/selected.txt" "$RUNNER_TEMP/parts.txt"
+          fi
+          : > "$RUNNER_TEMP/plan.tsv"
+          while read -r -u 3 family name rest; do
+            label="$family $name${rest:+ $rest}"
+            # shellcheck disable=SC2086
+            if ! key="$("$XTASK" prebuilt key "$family" "$name" $rest </dev/null | tail -n 1)" || [ -z "$key" ]; then
+              echo "::error::could not compute the key of $label"
+              printf '%s\t%s\t%s\n' "$label" "-" failed >> "$results"
+              continue
+            fi
+            short="${key:0:16}"
+            tag="$family-$short"
+            if assets="$(gh release view "$tag" --repo "$LEVITATE_PREBUILT_REPO" --json assets -q '.assets[].name' 2>"$RUNNER_TEMP/gh.err")"; then
+              if grep -Fxq 'prebuilt.json' <<<"$assets" && grep -Fxq "$family-$name.tar.gz" <<<"$assets"; then
+                printf '%s\t%s\t%s\n' "$label" "$short" skipped >> "$results"
+                continue
+              fi
+              echo "$tag exists but lacks assets; it will be completed"
+            elif ! grep -q 'release not found' "$RUNNER_TEMP/gh.err"; then
+              echo "::error::looking up release $tag: $(cat "$RUNNER_TEMP/gh.err")"
+              printf '%s\t%s\t%s\n' "$label" "$short" failed >> "$results"
+              continue
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' "$family" "$name" "$rest" "$key" "$label" >> "$RUNNER_TEMP/plan.tsv"
+            printf '%s\t%s\t%s\n' "$label" "$short" pending >> "$results"
+          done 3< "$RUNNER_TEMP/parts.txt"
+          if [ -s "$RUNNER_TEMP/plan.tsv" ]; then
+            echo "work=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "work=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to build."
+          fi
+        env:
+          PART: ${{ inputs.part }}
+
+      - name: Load the pinned compiler image and Ginux source
+        if: steps.plan.outputs.work == 'true'
+        id: pin
+        working-directory: levitate
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, re
+          from pathlib import Path
+          spec = json.loads(Path('tools/recipe/bootstrap/product-ci.json').read_text())
+          pins = {'GINUX_REPOSITORY': spec['ginux_repository'],
+                  'GINUX_SOURCE_SHA': spec['ginux_revision'],
+                  'IMAGE_SHA256': spec['image_sha256']}
+          assert re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', pins['GINUX_REPOSITORY'])
+          assert re.fullmatch(r'[0-9a-f]{40}', pins['GINUX_SOURCE_SHA'])
+          assert re.fullmatch(r'[0-9a-f]{64}', pins['IMAGE_SHA256'])
+          with open(os.environ['GITHUB_ENV'], 'a') as env, open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for name, value in pins.items():
+                  env.write(f'{name}={value}\n')
+                  out.write(f'{name.lower()}={value}\n')
+          PYTHON
+
+      - name: Cache the compiler image
+        if: steps.plan.outputs.work == 'true'
+        id: image-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: levitate/.artifacts/ginux-env/prepared-image-build-tools
+          key: compiler-image-${{ steps.pin.outputs.image_sha256 }}
+
+      - name: Check out the pinned Ginux source (to produce the image)
+        if: steps.plan.outputs.work == 'true' && steps.image-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GINUX_REPOSITORY }}
+          ref: ${{ env.GINUX_SOURCE_SHA }}
+          path: levitate/.artifacts/ginux-source
+          persist-credentials: false
+
+      - name: Produce the pinned C/runtime image from public inputs
+        if: steps.plan.outputs.work == 'true' && steps.image-cache.outputs.cache-hit != 'true'
+        working-directory: levitate
+        run: |
+          set -euo pipefail
+          # As Recipe's CI does: the pinned launcher, the image producer, then the script.
+          test "$(git -C .artifacts/ginux-source rev-parse HEAD)" = "$GINUX_SOURCE_SHA"
+          (cd .artifacts/ginux-source && make build)
+          cargo build --locked --release -p levitate-recipe --bin recipe-image
+          rm -rf .artifacts/ginux-env/prepared-image-build-tools
+          mkdir -p .artifacts/ginux-env
+          python3 tools/recipe/scripts/prepare-managed-image.py \
+            --spec tools/recipe/bootstrap/product-ci.json \
+            --ginux-source .artifacts/ginux-source \
+            --producer "$CARGO_TARGET_DIR/release/recipe-image" \
+            --input-root .artifacts/ginux-env/image-inputs \
+            --output .artifacts/ginux-env/prepared-image-build-tools
+
+      - name: Save the compiler image
+        if: steps.plan.outputs.work == 'true' && steps.image-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: levitate/.artifacts/ginux-env/prepared-image-build-tools
+          key: compiler-image-${{ steps.pin.outputs.image_sha256 }}
+
+      - name: Verify the compiler image against the pin
+        if: steps.plan.outputs.work == 'true'
+        working-directory: levitate
+        run: |
+          set -euo pipefail
+          dir=.artifacts/ginux-env/prepared-image-build-tools
+          actual="$(sha256sum "$dir/rootfs.tar" | cut -d' ' -f1)"
+          recorded="$(jq -r .sha256 "$dir/provenance.json")"
+          if [ "$actual" != "$IMAGE_SHA256" ] || [ "$recorded" != "$IMAGE_SHA256" ]; then
+            echo "::error::compiler image mismatch: pin $IMAGE_SHA256, rootfs.tar $actual, provenance.json $recorded"
+            exit 1
+          fi
+          echo "compiler image $IMAGE_SHA256 verified" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Recipe and the Ginux launcher (as the runner user)
+        if: steps.plan.outputs.work == 'true'
+        working-directory: levitate
+        run: |
+          set -euo pipefail
+          # The builder builds both on first use as root; built here they are already
+          # current there, so root writes nothing into the cargo registry or target.
+          cargo build --locked --release -p levitate-recipe --bin recipe
+          (cd tools/ginux && cargo build --locked -q -p ginux-init --bin ginux --release \
+            --target x86_64-unknown-linux-gnu --target-dir "$CARGO_TARGET_DIR/ginux")
+
+      - name: Compile and publish
+        if: steps.plan.outputs.work == 'true'
+        working-directory: levitate
+        run: |
+          set -uo pipefail
+          BUILDER="$CARGO_TARGET_DIR/release/distro-builder"
+          XTASK="$CARGO_TARGET_DIR/release/levitate-xtask"
+          results="$RUNNER_TEMP/results.tsv"
+          while IFS=$'\t' read -r -u 3 family name rest key label; do
+            short="${key:0:16}"
+            echo "::group::$label ($short)"
+            status=failed
+            # shellcheck disable=SC2086
+            if out="$(sudo -n -E env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+                  "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" \
+                  CARGO_NET_OFFLINE=true "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
+                  "$BUILDER" --repo-root "$REPO" prebuilt build "$family" "$name" $rest </dev/null)"; then
+              built="$(printf '%s\n' "$out" | tail -n 2 | head -n 1)"
+              if [ "$built" != "$key" ]; then
+                echo "::error::$label: built key $built is not the planned key $key"
+              else
+                # Root made files under .artifacts; the publish below runs as the runner user.
+                sudo chown -R "$(id -u):$(id -g)" "$REPO/.artifacts"
+                if "$XTASK" prebuilt publish "$family" "$name" $rest </dev/null; then
+                  status=published
+                else
+                  echo "::error::publishing $label failed"
+                fi
+              fi
+            else
+              echo "::error::compiling $label failed"
+            fi
+            sudo chown -R "$(id -u):$(id -g)" "$REPO/.artifacts"
+            echo "::endgroup::"
+            printf '%s\t%s\t%s\n' "$label" "$short" "$status" >> "$results"
+          done 3< "$RUNNER_TEMP/plan.tsv"
+          exit 0
+
+      - name: Hand files back to the runner user
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "$REPO/.artifacts" "$HOME/.cargo" "$HOME/.rustup" 2>/dev/null || true
+
+      - name: Save cargo registry cache
+        if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-v1-${{ env.WEEK }}-${{ hashFiles('levitate/Cargo.lock', 'levitate/tools/ginux/Cargo.lock') }}
+
+      - name: Save cargo target cache
+        if: always() && steps.target-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: levitate/.artifacts/work/iso-runtime-fixes/cargo-host
+          key: target-v1-${{ env.WEEK }}-${{ hashFiles('levitate/Cargo.lock', 'levitate/tools/ginux/Cargo.lock') }}
+
+      - name: Save download store cache
+        if: always() && steps.store-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: levitate/.artifacts/store/sha256
+          key: store-v1-${{ hashFiles('levitate/distro/builder/os-recipes/**') }}
+
+      - name: Report
+        if: always()
+        run: |
+          set -uo pipefail
+          results="$RUNNER_TEMP/results.tsv"
+          [ -f "$results" ] || { echo "No part was planned (the run failed before the plan)."; exit 1; }
+          # A later line for a part replaces its earlier one (pending -> published or failed).
+          final="$(awk -F'\t' '{ if (!($1 in seen)) order[++n] = $1; seen[$1] = 1; line[$1] = $0 } END { for (i = 1; i <= n; i++) print line[order[i]] }' "$results")"
+          {
+            echo '### Parts'
+            echo
+            echo '| Part | Key (16) | Result |'
+            echo '| --- | --- | --- |'
+            printf '%s\n' "$final" | awk -F'\t' '{ r = ($3 == "pending") ? "not reached" : $3; printf "| %s | `%s` | %s |\n", $1, $2, r }'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if printf '%s\n' "$final" | awk -F'\t' '$3 == "failed" || $3 == "pending" { bad = 1 } END { exit !bad }'; then
+            echo "::error::at least one part failed or was not reached"
+            exit 1
+          fi
