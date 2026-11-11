@@ -160,7 +160,8 @@ jobs:
               printf '%s\t%s\t%s\n' "$label" "$short" failed >> "$results"
               continue
             fi
-            printf '%s\t%s\t%s\t%s\t%s\n' "$family" "$name" "$rest" "$key" "$label" >> "$RUNNER_TEMP/plan.tsv"
+            # '|', not a tab: read collapses consecutive tabs, and rest is often empty.
+            printf '%s|%s|%s|%s|%s\n' "$family" "$name" "$rest" "$key" "$label" >> "$RUNNER_TEMP/plan.tsv"
             printf '%s\t%s\t%s\n' "$label" "$short" pending >> "$results"
           done 3< "$RUNNER_TEMP/parts.txt"
           if [ -s "$RUNNER_TEMP/plan.tsv" ]; then
@@ -268,12 +269,12 @@ jobs:
           BUILDER="$CARGO_TARGET_DIR/release/distro-builder"
           XTASK="$CARGO_TARGET_DIR/release/levitate-xtask"
           results="$RUNNER_TEMP/results.tsv"
-          while IFS=$'\t' read -r -u 3 family name rest key label; do
+          while IFS='|' read -r -u 3 family name rest key label; do
             short="${key:0:16}"
             echo "::group::$label ($short)"
             status=failed
             # shellcheck disable=SC2086
-            if out="$(sudo -n -E env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            if out="$(sudo -n env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
                   "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" \
                   CARGO_NET_OFFLINE=true "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
                   "$BUILDER" --repo-root "$REPO" prebuilt build "$family" "$name" $rest </dev/null)"; then
