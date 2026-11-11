@@ -115,6 +115,15 @@ jobs:
           key: store-v1-${{ hashFiles('levitate/distro/builder/os-recipes/**') }}
           restore-keys: store-v1-
 
+      - name: Bun (the TUI source snapshot generates docs/content's page index on the host)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install the JavaScript workspace
+        working-directory: levitate
+        run: bun install --frozen-lockfile
+
       - name: Build distro-builder and xtask
         working-directory: levitate
         run: |
