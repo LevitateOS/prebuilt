@@ -122,7 +122,7 @@ jobs:
           # Fetch everything now, as the runner user: root's builds run offline.
           cargo fetch --locked
           cargo fetch --locked --manifest-path tools/ginux/Cargo.toml
-          cargo build --locked --release -p distro-builder --bin distro-builder -p levitate-xtask
+          cargo build --locked --release -p distro-builder --bin distro-builder -p levitate-xtask --bin levitate-xtask
 
       - name: Plan (list, key, look for releases)
         id: plan
