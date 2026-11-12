@@ -303,6 +303,18 @@ jobs:
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" "$REPO/.artifacts" "$HOME/.cargo" "$HOME/.rustup" 2>/dev/null || true
 
+      - name: Keep the logs of failed parts
+        if: failure() || steps.plan.outputs.work == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: part-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            levitate/.artifacts/work/unpack/logs/
+            levitate/.artifacts/work/**/recipe-state/logs/**/*.log
+            levitate/.artifacts/work/**/recipe-state/logs/**/result.json
+
       - name: Save cargo registry cache
         if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
