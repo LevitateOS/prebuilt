@@ -22,8 +22,8 @@ digest, and compiles when there is no match. Release builds always compile.
 `.github/workflows/publish.yml` runs every hour (at minute 17) and on demand (Actions >
 Publish prebuilt parts > Run workflow; its optional `part` input builds one part, written
 as `distro-builder prebuilt list` prints it, such as `tools recab`). It checks out
-LevitateOS with its submodules at the heads of their branches, lists every part, computes
-each key and skips the parts whose release already holds both assets. For the rest it
+LevitateOS with its submodules (shallow, depth 1) at the heads of their branches, lists every part, computes
+each key and skips the parts whose release already holds both assets. For the rest (and only then: clearing disk space, the image and the launcher are skipped when there is nothing to build) it
 produces the pinned compiler image and compiles the part with `distro-builder prebuilt
 build` (the recipe an ISO build uses, as root through `sudo`), then publishes it with
 `distro-builder prebuilt publish` as the runner user. A release is never replaced. The

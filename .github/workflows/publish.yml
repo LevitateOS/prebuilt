@@ -3,6 +3,8 @@ name: Publish prebuilt parts
 # Compiles every part `distro-builder prebuilt list` names whose release is missing here,
 # with the recipe an ISO build uses, and publishes it as the release <family>-<key16>.
 # Never replaces a published asset (`prebuilt publish` refuses). See README.md.
+# Checkouts are shallow (history is never read), and the steps that only compile parts
+# (clearing disk space, the image, Recipe, the launcher) run only when the plan found work.
 
 on:
   schedule:
@@ -44,6 +46,7 @@ jobs:
         with:
           repository: LevitateOS/LevitateOS
           submodules: recursive
+          fetch-depth: 1
           path: levitate
           persist-credentials: false
 
@@ -56,8 +59,8 @@ jobs:
             name="${key#submodule.}"
             name="${name%.branch}"
             path="$(git config -f .gitmodules "submodule.${name}.path")"
-            git submodule update --init --remote -- "$path"
-            git -C "$path" submodule update --init --recursive
+            git submodule update --init --remote --depth 1 -- "$path"
+            git -C "$path" submodule update --init --recursive --depth 1
           done
           {
             echo '### Sources'
@@ -73,11 +76,6 @@ jobs:
             done
             echo
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Make room on the runner
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
 
       - name: Host tools
         run: |
@@ -173,6 +171,12 @@ jobs:
         env:
           PART: ${{ inputs.part }}
 
+      - name: Make room on the runner
+        if: steps.plan.outputs.work == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Load the pinned compiler image and Ginux source
         if: steps.plan.outputs.work == 'true'
         id: pin
@@ -208,6 +212,7 @@ jobs:
         with:
           repository: ${{ env.GINUX_REPOSITORY }}
           ref: ${{ env.GINUX_SOURCE_SHA }}
+          fetch-depth: 1
           path: levitate/.artifacts/ginux-source
           persist-credentials: false
 
