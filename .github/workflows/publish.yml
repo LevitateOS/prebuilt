@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Check out LevitateOS
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: LevitateOS/LevitateOS
           submodules: recursive
@@ -89,7 +89,7 @@ jobs:
 
       - name: Cache cargo registry
         id: cargo-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -99,7 +99,7 @@ jobs:
 
       - name: Cache cargo target (Recipe, Ginux, builder)
         id: target-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: levitate/.artifacts/work/iso-runtime-fixes/cargo-host
           key: target-v1-${{ env.WEEK }}-${{ hashFiles('levitate/Cargo.lock', 'levitate/tools/ginux/Cargo.lock') }}
@@ -107,7 +107,7 @@ jobs:
 
       - name: Cache download store
         id: store-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: levitate/.artifacts/store/sha256
           key: store-v1-${{ hashFiles('levitate/distro/builder/os-recipes/**') }}
@@ -201,14 +201,14 @@ jobs:
       - name: Cache the compiler image
         if: steps.plan.outputs.work == 'true'
         id: image-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: levitate/.artifacts/ginux-env/prepared-image-build-tools
           key: compiler-image-${{ steps.pin.outputs.image_sha256 }}
 
       - name: Check out the pinned Ginux source (to produce the image)
         if: steps.plan.outputs.work == 'true' && steps.image-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.GINUX_REPOSITORY }}
           ref: ${{ env.GINUX_SOURCE_SHA }}
@@ -236,7 +236,7 @@ jobs:
 
       - name: Save the compiler image
         if: steps.plan.outputs.work == 'true' && steps.image-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: levitate/.artifacts/ginux-env/prepared-image-build-tools
           key: compiler-image-${{ steps.pin.outputs.image_sha256 }}
@@ -310,7 +310,7 @@ jobs:
 
       - name: Keep the logs of failed parts
         if: failure() || steps.plan.outputs.work == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: part-logs
           if-no-files-found: ignore
@@ -322,7 +322,7 @@ jobs:
 
       - name: Save cargo registry cache
         if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cargo/registry
@@ -331,14 +331,14 @@ jobs:
 
       - name: Save cargo target cache
         if: always() && steps.target-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: levitate/.artifacts/work/iso-runtime-fixes/cargo-host
           key: target-v1-${{ env.WEEK }}-${{ hashFiles('levitate/Cargo.lock', 'levitate/tools/ginux/Cargo.lock') }}
 
       - name: Save download store cache
         if: always() && steps.store-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: levitate/.artifacts/store/sha256
           key: store-v1-${{ hashFiles('levitate/distro/builder/os-recipes/**') }}
